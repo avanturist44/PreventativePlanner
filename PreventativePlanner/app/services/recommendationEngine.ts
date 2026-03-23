@@ -45,7 +45,7 @@ export function generateRecommendations(userProfile: UserProfile): Recommendatio
     });
   }
 
-  if(riskFactors.includes("smoke")){
+  if(riskFactors.includes("Smoking")){
     recommendations.push({
       id: "lung_screening",
       title: "Lung Cancer Screening",
