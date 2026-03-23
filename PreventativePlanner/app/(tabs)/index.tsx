@@ -1,6 +1,7 @@
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
-import React, { useState, useCallback } from "react";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import React, { useState, useCallback, useEffect } from "react";
 import {
   FlatList,
   Platform,
@@ -17,8 +18,11 @@ import Animated, {
   withSpring,
 } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useRouter } from "expo-router";
 
 import Colors from "@/constants/colors";
+import { supabase } from "@/supabaseClient";
+import { generateRecommendations } from "@/app/services/recommendationEngine";
 
 type Status = "upcoming" | "completed";
 
@@ -29,59 +33,6 @@ interface Recommendation {
   status: Status;
   category: string;
 }
-// Temporary hardcoded recommendation data for UI testing.
-// This will later be replaced by data from the recommendation engine/database.
-const SAMPLE_DATA: Recommendation[] = [
-  {
-    id: "1",
-    title: "Annual Physical",
-    due_date: "2026-04-15",
-    status: "upcoming",
-    category: "General",
-  },
-  {
-    id: "2",
-    title: "Mammogram",
-    due_date: "2026-05-20",
-    status: "upcoming",
-    category: "Screening",
-  },
-  {
-    id: "3",
-    title: "Colon Cancer Screening",
-    due_date: "2026-06-10",
-    status: "upcoming",
-    category: "Screening",
-  },
-  {
-    id: "4",
-    title: "Blood Pressure Check",
-    due_date: "2026-03-30",
-    status: "upcoming",
-    category: "Monitoring",
-  },
-  {
-    id: "5",
-    title: "Cholesterol Panel",
-    due_date: "2026-07-01",
-    status: "upcoming",
-    category: "Lab Work",
-  },
-  {
-    id: "6",
-    title: "Flu Shot",
-    due_date: "2025-10-01",
-    status: "completed",
-    category: "Vaccination",
-  },
-  {
-    id: "7",
-    title: "Dental Cleaning",
-    due_date: "2025-12-15",
-    status: "completed",
-    category: "Dental",
-  },
-];
 
 function formatDate(dateStr: string) {
   const date = new Date(dateStr + "T00:00:00");
@@ -112,7 +63,7 @@ function TaskCard({
   task: Recommendation;
   onComplete: (id: string) => void;
   onUndo: (id: string) => void;
-}){
+}) {
   const scale = useSharedValue(1);
 
   const animatedStyle = useAnimatedStyle(() => ({
@@ -123,9 +74,11 @@ function TaskCard({
     scale.value = withSpring(0.96, { duration: 100 }, () => {
       scale.value = withSpring(1, { duration: 200 });
     });
+
     if (Platform.OS !== "web") {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     }
+
     onComplete(task.id);
   }, [task.id, onComplete, scale]);
 
@@ -147,97 +100,98 @@ function TaskCard({
       layout={Layout.springify()}
     >
       <Animated.View style={animatedStyle}>
-      <View
-        style={[
-          styles.card,
-          isCompleted && styles.cardCompleted,
-          { borderLeftColor: accentColor },
-        ]}
-      >
-        <View style={styles.cardContent}>
-          <View style={styles.cardMeta}>
-            <View
-              style={[
-                styles.categoryBadge,
-                { backgroundColor: accentColor + "15" },
-              ]}
-            >
-              <Text style={[styles.categoryText, { color: accentColor }]}>
-                {task.category}
-              </Text>
-            </View>
-            {!isCompleted && (overdue || dueSoon) && (
+        <View
+          style={[
+            styles.card,
+            isCompleted && styles.cardCompleted,
+            { borderLeftColor: accentColor },
+          ]}
+        >
+          <View style={styles.cardContent}>
+            <View style={styles.cardMeta}>
               <View
                 style={[
-                  styles.urgencyBadge,
+                  styles.categoryBadge,
                   { backgroundColor: accentColor + "15" },
                 ]}
               >
-                <Ionicons
-                  name={overdue ? "alert-circle" : "time-outline"}
-                  size={11}
-                  color={accentColor}
-                />
-                <Text style={[styles.urgencyText, { color: accentColor }]}>
-                  {overdue ? "Overdue" : "Due soon"}
+                <Text style={[styles.categoryText, { color: accentColor }]}>
+                  {task.category}
                 </Text>
               </View>
-            )}
-          </View>
 
-          <Text
-            style={[styles.taskTitle, isCompleted && styles.taskTitleDone]}
-            numberOfLines={2}
-          >
-            {task.title}
-          </Text>
-
-          <View style={styles.cardFooter}>
-            <View style={styles.dateRow}>
-              <Ionicons
-                name="calendar-outline"
-                size={13}
-                color={Colors.light.textTertiary}
-              />
-              <Text style={styles.dateText}>{formatDate(task.due_date)}</Text>
+              {!isCompleted && (overdue || dueSoon) && (
+                <View
+                  style={[
+                    styles.urgencyBadge,
+                    { backgroundColor: accentColor + "15" },
+                  ]}
+                >
+                  <Ionicons
+                    name={overdue ? "alert-circle" : "time-outline"}
+                    size={11}
+                    color={accentColor}
+                  />
+                  <Text style={[styles.urgencyText, { color: accentColor }]}>
+                    {overdue ? "Overdue" : "Due soon"}
+                  </Text>
+                </View>
+              )}
             </View>
 
-            {isCompleted ? (
-              <Pressable
-                onPress={() => onUndo(task.id)}
-                style={({ pressed }) => [
-                  styles.completeBtn,
-                  pressed && styles.completeBtnPressed,
-                ]}
-              >
+            <Text
+              style={[styles.taskTitle, isCompleted && styles.taskTitleDone]}
+              numberOfLines={2}
+            >
+              {task.title}
+            </Text>
+
+            <View style={styles.cardFooter}>
+              <View style={styles.dateRow}>
                 <Ionicons
-                  name="arrow-undo"
-                  size={14}
-                  color={Colors.light.success}
+                  name="calendar-outline"
+                  size={13}
+                  color={Colors.light.textTertiary}
                 />
-                <Text style={styles.completeBtnText}>Undo</Text>
-              </Pressable>
-            ) : (
-              <Pressable
-                onPress={handleComplete}
-                style={({ pressed }) => [
-                  styles.completeBtn,
-                  pressed && styles.completeBtnPressed,
-                ]}
-                accessibilityLabel={`Mark ${task.title} as complete`}
-                accessibilityRole="button"
-              >
-                <Ionicons
-                  name="checkmark"
-                  size={14}
-                  color={Colors.light.primary}
-                />
-                <Text style={styles.completeBtnText}>Mark done</Text>
-              </Pressable>
-            )}
+                <Text style={styles.dateText}>{formatDate(task.due_date)}</Text>
+              </View>
+
+              {isCompleted ? (
+                <Pressable
+                  onPress={() => onUndo(task.id)}
+                  style={({ pressed }) => [
+                    styles.completeBtn,
+                    pressed && styles.completeBtnPressed,
+                  ]}
+                >
+                  <Ionicons
+                    name="arrow-undo"
+                    size={14}
+                    color={Colors.light.success}
+                  />
+                  <Text style={styles.completeBtnText}>Undo</Text>
+                </Pressable>
+              ) : (
+                <Pressable
+                  onPress={handleComplete}
+                  style={({ pressed }) => [
+                    styles.completeBtn,
+                    pressed && styles.completeBtnPressed,
+                  ]}
+                  accessibilityLabel={`Mark ${task.title} as complete`}
+                  accessibilityRole="button"
+                >
+                  <Ionicons
+                    name="checkmark"
+                    size={14}
+                    color={Colors.light.primary}
+                  />
+                  <Text style={styles.completeBtnText}>Mark done</Text>
+                </Pressable>
+              )}
+            </View>
           </View>
         </View>
-      </View>
       </Animated.View>
     </Animated.View>
   );
@@ -255,14 +209,51 @@ function SectionHeader({ title, count }: { title: string; count: number }) {
 }
 
 export default function PlannerScreen() {
+  const router = useRouter();
   const insets = useSafeAreaInsets();
-  const [tasks, setTasks] = useState<Recommendation[]>(SAMPLE_DATA);
+  const [tasks, setTasks] = useState<Recommendation[]>([]);
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    router.replace("/AuthPage");
+  };
+
+  useEffect(() => {
+    loadRecommendations();
+  }, []);
+
+  const loadRecommendations = async () => {
+    try {
+      const stored = await AsyncStorage.getItem("health_profile");
+
+      if (!stored) {
+        setTasks([]);
+        return;
+      }
+
+      const profile = JSON.parse(stored);
+      const generated = generateRecommendations(profile);
+
+      const formatted: Recommendation[] = generated.map((item) => ({
+        id: item.id,
+        title: item.title,
+        category: item.category,
+        due_date: item.dueDate,
+        status: item.status,
+      }));
+
+      setTasks(formatted);
+    } catch (error) {
+      console.error("Error loading recommendations:", error);
+    }
+  };
 
   const markComplete = useCallback((id: string) => {
     setTasks((prev) =>
       prev.map((t) => (t.id === id ? { ...t, status: "completed" } : t))
     );
   }, []);
+
   const markIncomplete = useCallback((id: string) => {
     setTasks((prev) =>
       prev.map((t) => (t.id === id ? { ...t, status: "upcoming" } : t))
@@ -297,31 +288,42 @@ export default function PlannerScreen() {
     { type: "spacer" },
   ];
 
-  const topPad =
-    Platform.OS === "web" ? Math.max(insets.top, 67) : insets.top;
-  const bottomPad =
-    Platform.OS === "web" ? 34 : insets.bottom;
+  const topPad = Platform.OS === "web" ? Math.max(insets.top, 67) : insets.top;
+  const bottomPad = Platform.OS === "web" ? 34 : insets.bottom;
 
   const renderItem = ({ item }: { item: ListItem }) => {
     if (item.type === "header-card") {
       return (
         <View style={[styles.headerCard, { paddingTop: topPad + 16 }]}>
-          <Text style={styles.appName}>Preventative Care Planner</Text>
-          <Text style={styles.appSubtitle}>Track your preventative care recommendations</Text>
+          <View style={styles.topRow}>
+            <Text style={styles.appName}>Preventative Care Planner</Text>
+
+            <Pressable onPress={handleLogout} style={styles.logoutBtn}>
+              <Text style={styles.logoutText}>Logout</Text>
+            </Pressable>
+          </View>
+
+          <Text style={styles.appSubtitle}>
+            Track your preventative care recommendations
+          </Text>
 
           <View style={styles.statsRow}>
             <View style={styles.statBox}>
               <Text style={styles.statNum}>{upcoming.length}</Text>
               <Text style={styles.statLabel}>Upcoming</Text>
             </View>
+
             <View style={styles.statDivider} />
+
             <View style={styles.statBox}>
               <Text style={[styles.statNum, { color: Colors.light.success }]}>
                 {completed.length}
               </Text>
               <Text style={styles.statLabel}>Completed</Text>
             </View>
+
             <View style={styles.statDivider} />
+
             <View style={styles.statBox}>
               <Text style={styles.statNum}>{tasks.length}</Text>
               <Text style={styles.statLabel}>Total</Text>
@@ -335,6 +337,7 @@ export default function PlannerScreen() {
                 {Math.round(progress * 100)}%
               </Text>
             </View>
+
             <View style={styles.progressTrack}>
               <Animated.View
                 style={[
@@ -349,11 +352,21 @@ export default function PlannerScreen() {
     }
 
     if (item.type === "section-upcoming") {
-      return <SectionHeader title="Upcoming Recommendations" count={upcoming.length} />;
+      return (
+        <SectionHeader
+          title="Upcoming Recommendations"
+          count={upcoming.length}
+        />
+      );
     }
 
     if (item.type === "section-completed") {
-      return <SectionHeader title="Completed Recommendations" count={completed.length} />;
+      return (
+        <SectionHeader
+          title="Completed Recommendations"
+          count={completed.length}
+        />
+      );
     }
 
     if (item.type === "task") {
@@ -406,11 +419,18 @@ const styles = StyleSheet.create({
     paddingBottom: 28,
     marginBottom: 8,
   },
+  topRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
   appName: {
     fontSize: 28,
     fontFamily: "Inter_700Bold",
     color: "#FFFFFF",
     marginBottom: 4,
+    flex: 1,
+    marginRight: 12,
   },
   appSubtitle: {
     fontSize: 14,
@@ -418,6 +438,17 @@ const styles = StyleSheet.create({
     color: "rgba(255,255,255,0.75)",
     marginBottom: 24,
   },
+  logoutBtn: {
+    backgroundColor: "rgba(255,255,255,0.18)",
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+  logoutText: {
+    color: "#FFFFFF",
+    fontWeight: "600",
+  },
+
   statsRow: {
     flexDirection: "row",
     backgroundColor: "rgba(255,255,255,0.15)",
@@ -595,16 +626,5 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontFamily: "Inter_600SemiBold",
     color: Colors.light.primary,
-  },
-
-  completedBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-  },
-  completedBadgeText: {
-    fontSize: 13,
-    fontFamily: "Inter_600SemiBold",
-    color: Colors.light.success,
   },
 });
