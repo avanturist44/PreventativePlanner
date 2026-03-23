@@ -9,6 +9,7 @@ import {
   View,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { router } from "expo-router";
 
 const STORAGE_KEY = "health_profile";
 
@@ -121,6 +122,7 @@ export default function ProfileScreen() {
     try {
       await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(profile));
       Alert.alert("Success", "Profile saved successfully.");
+      router.replace("/(tabs)")
     } catch (error) {
       console.error("Failed to save profile:", error);
       Alert.alert("Error", "Could not save profile.");

@@ -18,7 +18,7 @@ import Animated, {
   withSpring,
 } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { useRouter } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 
 import Colors from "@/constants/colors";
 import { supabase } from "@/supabaseClient";
@@ -218,9 +218,11 @@ export default function PlannerScreen() {
     router.replace("/AuthPage");
   };
 
-  useEffect(() => {
-    loadRecommendations();
-  }, []);
+  useFocusEffect( 
+    useCallback(()=>{
+      loadRecommendations();
+    },[])
+  );    
 
   const loadRecommendations = async () => {
     try {
@@ -245,8 +247,9 @@ export default function PlannerScreen() {
       setTasks(formatted);
     } catch (error) {
       console.error("Error loading recommendations:", error);
+      setTasks([]);
     }
-  };
+  }
 
   const markComplete = useCallback((id: string) => {
     setTasks((prev) =>
