@@ -10,6 +10,7 @@ import {
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { router } from "expo-router";
+import { supabase } from "../../supabaseClient";
 
 const STORAGE_KEY = "health_profile";
 
@@ -43,8 +44,24 @@ export default function ProfileScreen() {
 
   const loadProfile = async () => {
     try {
-      const stored = await AsyncStorage.getItem(STORAGE_KEY);
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        const { data, error } = await supabase
+          .from("profiles")
+          .select("age, sex, risk_factors")
+          .eq("id", user.id)
+          .single();
 
+        if (!error && data) {
+          setAge(String(data.age));
+          setSex(data.sex as SexOption);
+          setRiskFactors(Array.isArray(data.risk_factors) ? data.risk_factors : []);
+          return;
+        }
+      }
+
+      // Fallback to local cache if Supabase unavailable
+      const stored = await AsyncStorage.getItem(STORAGE_KEY);
       if (stored) {
         const parsed: HealthProfile = JSON.parse(stored);
         setAge(String(parsed.age));
@@ -120,9 +137,29 @@ export default function ProfileScreen() {
     };
 
     try {
+      const { data: { session } } = await supabase.auth.getSession();
+      console.log("Session:", session ? `role=${session.user.role} id=${session.user.id}` : "NULL");
+      const user = session?.user;
+      if (!user) throw new Error("Not authenticated");
+
+      const { error } = await supabase.from("profiles").upsert({
+        id: user.id,
+        age: profile.age,
+        sex: profile.sex,
+        risk_factors: profile.riskFactors,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'id' });
+
+      if (error) {
+        console.error("Supabase error:", JSON.stringify(error, null, 2));
+        throw error;
+      }
+
+      // Keep local cache in sync for offline reads
       await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(profile));
+
       Alert.alert("Success", "Profile saved successfully.");
-      router.replace("/(tabs)")
+      router.replace("/(tabs)");
     } catch (error) {
       console.error("Failed to save profile:", error);
       Alert.alert("Error", "Could not save profile.");
