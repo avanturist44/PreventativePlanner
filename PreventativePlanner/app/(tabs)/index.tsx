@@ -157,8 +157,8 @@ function TaskCard({
             <View style={styles.cardFooter}>
               {hasDate ? (
                 <Pressable onPress={() => onSchedule(task)} style={styles.dateRow}>
-                  <Ionicons name="calendar-outline" size={13} color={Colors.light.primary} />
-                  <Text style={[styles.dateText, { color: Colors.light.primary }]}>
+                  <Ionicons name="calendar-outline" size={13} color="#374151" />
+                  <Text style={[styles.dateText, { color: "#374151" }]}>
                     {formatDate(task.scheduled_date!)}
                   </Text>
                 </Pressable>
@@ -246,7 +246,7 @@ export default function PlannerScreen() {
       };
 
       setGenerating(true);
-      const aiRecs = await generateAIRecommendations(profile);
+      const aiRecs = await generateAIRecommendations(profile, user.id);
       setGenerating(false);
 
       const { data: appointments } = await supabase
@@ -490,16 +490,28 @@ export default function PlannerScreen() {
             <Text style={styles.modalTitle}>Schedule Appointment</Text>
             <Text style={styles.modalSubtitle}>{schedulingRec?.title}</Text>
 
-            <DateTimePicker
-              value={pickerDate}
-              mode="date"
-              display="spinner"
-              minimumDate={new Date()}
-              onChange={(_, date) => {
-                if (date) setPickerDate(date);
-              }}
-              style={styles.datePicker}
-            />
+            {Platform.OS === 'web' ? (
+              <input
+                type="date"
+                min={new Date().toISOString().split('T')[0]}
+                value={pickerDate.toISOString().split('T')[0]}
+                onChange={(e) => {
+                  if (e.target.value) setPickerDate(new Date(e.target.value + 'T00:00:00'));
+                }}
+                style={{ fontSize: 16, padding: 12, width: '100%', borderRadius: 8, border: '1px solid #ddd', marginVertical: 8 } as any}
+              />
+            ) : (
+              <DateTimePicker
+                value={pickerDate}
+                mode="date"
+                display="spinner"
+                minimumDate={new Date()}
+                onChange={(_: unknown, date?: Date) => {
+                  if (date) setPickerDate(date);
+                }}
+                style={styles.datePicker}
+              />
+            )}
 
             <View style={styles.modalButtons}>
               <Pressable

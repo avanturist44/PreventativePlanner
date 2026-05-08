@@ -1,4 +1,4 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { supabase } from '@/supabaseClient';
 
 export type UserProfile = {
   age: number;
@@ -13,42 +13,48 @@ export type AIRecommendation = {
   explanation: string;
 };
 
-export async function generateAIRecommendations(profile: UserProfile): Promise<AIRecommendation[]> {
-  const cacheKey = `ai_recs_${JSON.stringify(profile)}`;
-  const cached = await AsyncStorage.getItem(cacheKey);
-  if (cached) return JSON.parse(cached);
+export async function generateAIRecommendations(
+  profile: UserProfile,
+  userId: string
+): Promise<AIRecommendation[]> {
+  const profileHash = JSON.stringify(profile);
 
-  const riskText = profile.riskFactors.length > 0 ? profile.riskFactors.join(', ') : 'none';
+  // Check if we already have recommendations for this exact profile
+  const { data: existing } = await supabase
+    .from('recommendations')
+    .select('recommendation_id, title, category, explanation, profile_hash')
+    .eq('user_id', userId);
 
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${process.env.EXPO_PUBLIC_OPENAI_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: 'gpt-4o-mini',
-      response_format: { type: 'json_object' },
-      messages: [
-        {
-          role: 'system',
-          content:
-            'You are a preventative healthcare advisor. Return a JSON object with a single key "recommendations" containing an array. Each item must have: id (unique snake_case string), title (short appointment name), category (one of: Screening, Checkup, Vaccination, Consultation), explanation (1-2 sentences personalized to this specific patient).',
-        },
-        {
-          role: 'user',
-          content: `Patient: ${profile.age} year old ${profile.sex}. Risk factors: ${riskText}. Generate 4-6 preventative care recommendations.`,
-        },
-      ],
-    }),
+  if (existing && existing.length > 0 && existing[0].profile_hash === profileHash) {
+    return existing.map((r) => ({
+      id: r.recommendation_id,
+      title: r.title,
+      category: r.category,
+      explanation: r.explanation,
+    }));
+  }
+
+  // Profile changed or no recommendations yet — call the AI
+  const { data, error } = await supabase.functions.invoke('recommend', {
+    body: { profile },
   });
 
-  if (!response.ok) throw new Error(`OpenAI API error: ${response.status}`);
+  if (error) throw new Error(`Edge function error: ${error.message}`);
 
-  const data = await response.json();
-  const parsed = JSON.parse(data.choices[0].message.content);
-  const recs: AIRecommendation[] = parsed.recommendations;
+  const recs: AIRecommendation[] = data;
 
-  await AsyncStorage.setItem(cacheKey, JSON.stringify(recs));
+  // Replace old recommendations with new ones
+  await supabase.from('recommendations').delete().eq('user_id', userId);
+  await supabase.from('recommendations').insert(
+    recs.map((rec) => ({
+      user_id: userId,
+      recommendation_id: rec.id,
+      title: rec.title,
+      category: rec.category,
+      explanation: rec.explanation,
+      profile_hash: profileHash,
+    }))
+  );
+
   return recs;
 }

@@ -23,7 +23,9 @@ export default function AuthPage() {
   async function handleLogin() {
     if (!email || !password) { showMsg('Please fill in all fields.', 'error'); return }
     setLoading(true)
-    const { error } = await supabase.auth.signInWithPassword({ email, password })
+    console.log('[auth] attempting signIn for:', email)
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password })
+    console.log('[auth] result — user:', data?.user?.id ?? 'null', 'error:', error?.message ?? 'none')
     if (error) showMsg(error.message, 'error')
     // On success, useAuth in _layout.tsx detects the session and unmounts this page automatically
     setLoading(false)
