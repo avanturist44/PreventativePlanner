@@ -137,27 +137,29 @@ export default function ProfileScreen() {
     };
 
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      console.log("Session:", session ? `role=${session.user.role} id=${session.user.id}` : "NULL");
-      const user = session?.user;
+      const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Not authenticated");
 
-      const { error } = await supabase.from("profiles").upsert({
-        id: user.id,
+      const row = {
         age: profile.age,
         sex: profile.sex,
         risk_factors: profile.riskFactors,
         updated_at: new Date().toISOString(),
-      }, { onConflict: 'id' });
+      };
 
-      if (error) {
-        console.error("Supabase error:", JSON.stringify(error, null, 2));
-        throw error;
-      }
+      const { data: existing } = await supabase
+        .from("profiles")
+        .select("id")
+        .eq("id", user.id)
+        .maybeSingle();
 
-      // Keep local cache in sync for offline reads
+      const { error } = existing
+        ? await supabase.from("profiles").update(row).eq("id", user.id)
+        : await supabase.from("profiles").insert({ id: user.id, ...row });
+
+      if (error) throw error;
+
       await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(profile));
-
       Alert.alert("Success", "Profile saved successfully.");
       router.replace("/(tabs)");
     } catch (error) {

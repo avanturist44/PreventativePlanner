@@ -1,9 +1,11 @@
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
-import AsyncStorage from "@react-native-async-storage/async-storage";
+import DateTimePicker from "@react-native-community/datetimepicker";
 import React, { useState, useCallback, useEffect } from "react";
 import {
+  ActivityIndicator,
   FlatList,
+  Modal,
   Platform,
   Pressable,
   StyleSheet,
@@ -22,16 +24,17 @@ import { useFocusEffect, useRouter } from "expo-router";
 
 import Colors from "@/constants/colors";
 import { supabase } from "@/supabaseClient";
-import { generateRecommendations } from "@/app/services/recommendationEngine";
+import { generateAIRecommendations } from "@/app/services/recommendationEngine";
 
 type Status = "upcoming" | "completed";
 
 interface Recommendation {
   id: string;
   title: string;
-  due_date: string;
-  status: Status;
   category: string;
+  explanation: string;
+  scheduled_date: string | null;
+  status: Status;
 }
 
 function formatDate(dateStr: string) {
@@ -59,10 +62,12 @@ function TaskCard({
   task,
   onComplete,
   onUndo,
+  onSchedule,
 }: {
   task: Recommendation;
   onComplete: (id: string) => void;
   onUndo: (id: string) => void;
+  onSchedule: (rec: Recommendation) => void;
 }) {
   const scale = useSharedValue(1);
 
@@ -74,16 +79,15 @@ function TaskCard({
     scale.value = withSpring(0.96, { duration: 100 }, () => {
       scale.value = withSpring(1, { duration: 200 });
     });
-
     if (Platform.OS !== "web") {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     }
-
     onComplete(task.id);
   }, [task.id, onComplete, scale]);
 
-  const dueSoon = isDueSoon(task.due_date);
-  const overdue = isOverdue(task.due_date);
+  const hasDate = task.scheduled_date !== null;
+  const dueSoon = hasDate && isDueSoon(task.scheduled_date!);
+  const overdue = hasDate && isOverdue(task.scheduled_date!);
   const isCompleted = task.status === "completed";
 
   const accentColor = isCompleted
@@ -120,7 +124,7 @@ function TaskCard({
                 </Text>
               </View>
 
-              {!isCompleted && (overdue || dueSoon) && (
+              {hasDate && !isCompleted && (overdue || dueSoon) && (
                 <View
                   style={[
                     styles.urgencyBadge,
@@ -146,49 +150,44 @@ function TaskCard({
               {task.title}
             </Text>
 
+            <Text style={styles.explanation} numberOfLines={3}>
+              {task.explanation}
+            </Text>
+
             <View style={styles.cardFooter}>
-              <View style={styles.dateRow}>
-                <Ionicons
-                  name="calendar-outline"
-                  size={13}
-                  color={Colors.light.textTertiary}
-                />
-                <Text style={styles.dateText}>{formatDate(task.due_date)}</Text>
-              </View>
+              {hasDate ? (
+                <Pressable onPress={() => onSchedule(task)} style={styles.dateRow}>
+                  <Ionicons name="calendar-outline" size={13} color={Colors.light.primary} />
+                  <Text style={[styles.dateText, { color: Colors.light.primary }]}>
+                    {formatDate(task.scheduled_date!)}
+                  </Text>
+                </Pressable>
+              ) : (
+                <Pressable onPress={() => onSchedule(task)} style={styles.scheduleBtnOutline}>
+                  <Ionicons name="calendar-outline" size={13} color={Colors.light.primary} />
+                  <Text style={styles.scheduleBtnText}>Schedule</Text>
+                </Pressable>
+              )}
 
               {isCompleted ? (
                 <Pressable
                   onPress={() => onUndo(task.id)}
-                  style={({ pressed }) => [
-                    styles.completeBtn,
-                    pressed && styles.completeBtnPressed,
-                  ]}
+                  style={({ pressed }) => [styles.completeBtn, pressed && styles.completeBtnPressed]}
                 >
-                  <Ionicons
-                    name="arrow-undo"
-                    size={14}
-                    color={Colors.light.success}
-                  />
+                  <Ionicons name="arrow-undo" size={14} color={Colors.light.success} />
                   <Text style={styles.completeBtnText}>Undo</Text>
                 </Pressable>
-              ) : (
+              ) : hasDate ? (
                 <Pressable
                   onPress={handleComplete}
-                  style={({ pressed }) => [
-                    styles.completeBtn,
-                    pressed && styles.completeBtnPressed,
-                  ]}
+                  style={({ pressed }) => [styles.completeBtn, pressed && styles.completeBtnPressed]}
                   accessibilityLabel={`Mark ${task.title} as complete`}
                   accessibilityRole="button"
                 >
-                  <Ionicons
-                    name="checkmark"
-                    size={14}
-                    color={Colors.light.primary}
-                  />
+                  <Ionicons name="checkmark" size={14} color={Colors.light.primary} />
                   <Text style={styles.completeBtnText}>Mark done</Text>
                 </Pressable>
-              )}
+              ) : null}
             </View>
           </View>
         </View>
@@ -212,63 +211,150 @@ export default function PlannerScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [tasks, setTasks] = useState<Recommendation[]>([]);
+  const [generating, setGenerating] = useState(false);
+  const [schedulingRec, setSchedulingRec] = useState<Recommendation | null>(null);
+  const [pickerDate, setPickerDate] = useState(new Date());
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
     router.replace("/AuthPage");
   };
 
-  useFocusEffect( 
-    useCallback(()=>{
+  useFocusEffect(
+    useCallback(() => {
       loadRecommendations();
-    },[])
-  );    
+    }, [])
+  );
 
   const loadRecommendations = async () => {
     try {
-      const stored = await AsyncStorage.getItem("health_profile");
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) { setTasks([]); return; }
 
-      if (!stored) {
-        setTasks([]);
-        return;
-      }
+      const { data: profileData } = await supabase
+        .from("profiles")
+        .select("age, sex, risk_factors")
+        .eq("id", user.id)
+        .maybeSingle();
 
-      const profile = JSON.parse(stored);
-      const generated = generateRecommendations(profile);
+      if (!profileData) { setTasks([]); return; }
 
-      const formatted: Recommendation[] = generated.map((item) => ({
-        id: item.id,
-        title: item.title,
-        category: item.category,
-        due_date: item.dueDate,
-        status: item.status,
-      }));
+      const profile = {
+        age: profileData.age,
+        sex: profileData.sex,
+        riskFactors: profileData.risk_factors as string[],
+      };
 
-      setTasks(formatted);
+      setGenerating(true);
+      const aiRecs = await generateAIRecommendations(profile);
+      setGenerating(false);
+
+      const { data: appointments } = await supabase
+        .from("appointments")
+        .select("recommendation_id, scheduled_date, status")
+        .eq("user_id", user.id);
+
+      const apptMap = new Map((appointments ?? []).map((a) => [a.recommendation_id, a]));
+
+      const merged: Recommendation[] = aiRecs.map((rec) => {
+        const appt = apptMap.get(rec.id);
+        return {
+          id: rec.id,
+          title: rec.title,
+          category: rec.category,
+          explanation: rec.explanation,
+          scheduled_date: appt?.scheduled_date ?? null,
+          status: (appt?.status as Status) ?? "upcoming",
+        };
+      });
+
+      setTasks(merged);
     } catch (error) {
       console.error("Error loading recommendations:", error);
+      setGenerating(false);
       setTasks([]);
     }
-  }
+  };
 
-  const markComplete = useCallback((id: string) => {
+  const saveAppointment = async (rec: Recommendation, date: Date) => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+
+    const dateStr = date.toISOString().split("T")[0];
+
+    const { data: existing } = await supabase
+      .from("appointments")
+      .select("id")
+      .eq("user_id", user.id)
+      .eq("recommendation_id", rec.id)
+      .maybeSingle();
+
+    if (existing) {
+      await supabase
+        .from("appointments")
+        .update({ scheduled_date: dateStr, updated_at: new Date().toISOString() })
+        .eq("user_id", user.id)
+        .eq("recommendation_id", rec.id);
+    } else {
+      await supabase.from("appointments").insert({
+        user_id: user.id,
+        recommendation_id: rec.id,
+        title: rec.title,
+        scheduled_date: dateStr,
+        status: "upcoming",
+      });
+    }
+
     setTasks((prev) =>
-      prev.map((t) => (t.id === id ? { ...t, status: "completed" } : t))
+      prev.map((t) => (t.id === rec.id ? { ...t, scheduled_date: dateStr } : t))
     );
+  };
+
+  const markComplete = useCallback(async (id: string) => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (user) {
+      await supabase
+        .from("appointments")
+        .update({ status: "completed", updated_at: new Date().toISOString() })
+        .eq("user_id", user.id)
+        .eq("recommendation_id", id);
+    }
+    setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, status: "completed" } : t)));
   }, []);
 
-  const markIncomplete = useCallback((id: string) => {
-    setTasks((prev) =>
-      prev.map((t) => (t.id === id ? { ...t, status: "upcoming" } : t))
-    );
+  const markIncomplete = useCallback(async (id: string) => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (user) {
+      await supabase
+        .from("appointments")
+        .update({ status: "upcoming", updated_at: new Date().toISOString() })
+        .eq("user_id", user.id)
+        .eq("recommendation_id", id);
+    }
+    setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, status: "upcoming" } : t)));
   }, []);
+
+  const openScheduler = (rec: Recommendation) => {
+    setPickerDate(
+      rec.scheduled_date ? new Date(rec.scheduled_date + "T00:00:00") : new Date()
+    );
+    setSchedulingRec(rec);
+  };
+
+  const confirmSchedule = async () => {
+    if (!schedulingRec) return;
+    await saveAppointment(schedulingRec, pickerDate);
+    setSchedulingRec(null);
+  };
 
   const upcoming = tasks.filter((t) => t.status === "upcoming");
   const completed = tasks.filter((t) => t.status === "completed");
+  const scheduled = tasks.filter((t) => t.scheduled_date !== null);
   const progress = tasks.length > 0 ? completed.length / tasks.length : 0;
 
   type ListItem =
     | { type: "header-card" }
+    | { type: "generating" }
     | { type: "section-upcoming" }
     | { type: "task"; task: Recommendation }
     | { type: "section-completed" }
@@ -276,6 +362,7 @@ export default function PlannerScreen() {
 
   const listData: ListItem[] = [
     { type: "header-card" },
+    ...(generating ? [{ type: "generating" as const }] : []),
     ...(upcoming.length > 0
       ? [
           { type: "section-upcoming" as const },
@@ -300,7 +387,6 @@ export default function PlannerScreen() {
         <View style={[styles.headerCard, { paddingTop: topPad + 16 }]}>
           <View style={styles.topRow}>
             <Text style={styles.appName}>Preventative Care Planner</Text>
-
             <Pressable onPress={handleLogout} style={styles.logoutBtn}>
               <Text style={styles.logoutText}>Logout</Text>
             </Pressable>
@@ -315,38 +401,28 @@ export default function PlannerScreen() {
               <Text style={styles.statNum}>{upcoming.length}</Text>
               <Text style={styles.statLabel}>Upcoming</Text>
             </View>
-
             <View style={styles.statDivider} />
-
             <View style={styles.statBox}>
               <Text style={[styles.statNum, { color: Colors.light.success }]}>
                 {completed.length}
               </Text>
               <Text style={styles.statLabel}>Completed</Text>
             </View>
-
             <View style={styles.statDivider} />
-
             <View style={styles.statBox}>
-              <Text style={styles.statNum}>{tasks.length}</Text>
-              <Text style={styles.statLabel}>Total</Text>
+              <Text style={styles.statNum}>{scheduled.length}</Text>
+              <Text style={styles.statLabel}>Scheduled</Text>
             </View>
           </View>
 
           <View style={styles.progressSection}>
             <View style={styles.progressLabelRow}>
               <Text style={styles.progressLabel}>Overall Progress</Text>
-              <Text style={styles.progressPct}>
-                {Math.round(progress * 100)}%
-              </Text>
+              <Text style={styles.progressPct}>{Math.round(progress * 100)}%</Text>
             </View>
-
             <View style={styles.progressTrack}>
               <Animated.View
-                style={[
-                  styles.progressFill,
-                  { width: `${progress * 100}%` as any },
-                ]}
+                style={[styles.progressFill, { width: `${progress * 100}%` as any }]}
               />
             </View>
           </View>
@@ -354,22 +430,21 @@ export default function PlannerScreen() {
       );
     }
 
-    if (item.type === "section-upcoming") {
+    if (item.type === "generating") {
       return (
-        <SectionHeader
-          title="Upcoming Recommendations"
-          count={upcoming.length}
-        />
+        <View style={styles.generatingRow}>
+          <ActivityIndicator size="small" color={Colors.light.primary} />
+          <Text style={styles.generatingText}>Generating your recommendations…</Text>
+        </View>
       );
     }
 
+    if (item.type === "section-upcoming") {
+      return <SectionHeader title="Upcoming Recommendations" count={upcoming.length} />;
+    }
+
     if (item.type === "section-completed") {
-      return (
-        <SectionHeader
-          title="Completed Recommendations"
-          count={completed.length}
-        />
-      );
+      return <SectionHeader title="Completed" count={completed.length} />;
     }
 
     if (item.type === "task") {
@@ -378,6 +453,7 @@ export default function PlannerScreen() {
           task={item.task}
           onComplete={markComplete}
           onUndo={markIncomplete}
+          onSchedule={openScheduler}
         />
       );
     }
@@ -400,8 +476,45 @@ export default function PlannerScreen() {
         }}
         contentContainerStyle={styles.listContent}
         showsVerticalScrollIndicator={false}
-        scrollEnabled={listData.length > 0}
       />
+
+      {/* Date picker modal */}
+      <Modal
+        visible={schedulingRec !== null}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setSchedulingRec(null)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Schedule Appointment</Text>
+            <Text style={styles.modalSubtitle}>{schedulingRec?.title}</Text>
+
+            <DateTimePicker
+              value={pickerDate}
+              mode="date"
+              display="spinner"
+              minimumDate={new Date()}
+              onChange={(_, date) => {
+                if (date) setPickerDate(date);
+              }}
+              style={styles.datePicker}
+            />
+
+            <View style={styles.modalButtons}>
+              <Pressable
+                onPress={() => setSchedulingRec(null)}
+                style={styles.modalCancelBtn}
+              >
+                <Text style={styles.modalCancelText}>Cancel</Text>
+              </Pressable>
+              <Pressable onPress={confirmSchedule} style={styles.modalConfirmBtn}>
+                <Text style={styles.modalConfirmText}>Confirm</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -460,10 +573,7 @@ const styles = StyleSheet.create({
     marginBottom: 20,
     alignItems: "center",
   },
-  statBox: {
-    flex: 1,
-    alignItems: "center",
-  },
+  statBox: { flex: 1, alignItems: "center" },
   statDivider: {
     width: 1,
     height: 32,
@@ -484,9 +594,7 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
 
-  progressSection: {
-    gap: 8,
-  },
+  progressSection: { gap: 8 },
   progressLabelRow: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -511,6 +619,19 @@ const styles = StyleSheet.create({
     height: "100%",
     backgroundColor: "#FFFFFF",
     borderRadius: 4,
+  },
+
+  generatingRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingVertical: 16,
+    paddingHorizontal: 4,
+  },
+  generatingText: {
+    fontSize: 14,
+    fontFamily: "Inter_400Regular",
+    color: Colors.light.textSecondary,
   },
 
   sectionHeader: {
@@ -551,23 +672,10 @@ const styles = StyleSheet.create({
     elevation: 2,
     overflow: "hidden",
   },
-  cardCompleted: {
-    opacity: 0.7,
-  },
-  cardContent: {
-    padding: 14,
-    gap: 8,
-  },
-  cardMeta: {
-    flexDirection: "row",
-    gap: 6,
-    flexWrap: "wrap",
-  },
-  categoryBadge: {
-    borderRadius: 6,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-  },
+  cardCompleted: { opacity: 0.7 },
+  cardContent: { padding: 14, gap: 8 },
+  cardMeta: { flexDirection: "row", gap: 6, flexWrap: "wrap" },
+  categoryBadge: { borderRadius: 6, paddingHorizontal: 8, paddingVertical: 3 },
   categoryText: {
     fontSize: 11,
     fontFamily: "Inter_600SemiBold",
@@ -582,10 +690,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 7,
     paddingVertical: 3,
   },
-  urgencyText: {
-    fontSize: 11,
-    fontFamily: "Inter_600SemiBold",
-  },
+  urgencyText: { fontSize: 11, fontFamily: "Inter_600SemiBold" },
   taskTitle: {
     fontSize: 16,
     fontFamily: "Inter_600SemiBold",
@@ -595,6 +700,12 @@ const styles = StyleSheet.create({
   taskTitleDone: {
     textDecorationLine: "line-through",
     color: Colors.light.textTertiary,
+  },
+  explanation: {
+    fontSize: 13,
+    fontFamily: "Inter_400Regular",
+    color: Colors.light.textSecondary,
+    lineHeight: 18,
   },
   cardFooter: {
     flexDirection: "row",
@@ -612,7 +723,21 @@ const styles = StyleSheet.create({
     fontFamily: "Inter_400Regular",
     color: Colors.light.textTertiary,
   },
-
+  scheduleBtnOutline: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    borderWidth: 1,
+    borderColor: Colors.light.primary,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  scheduleBtnText: {
+    fontSize: 13,
+    fontFamily: "Inter_600SemiBold",
+    color: Colors.light.primary,
+  },
   completeBtn: {
     flexDirection: "row",
     alignItems: "center",
@@ -622,12 +747,67 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 7,
   },
-  completeBtnPressed: {
-    opacity: 0.7,
-  },
+  completeBtnPressed: { opacity: 0.7 },
   completeBtnText: {
     fontSize: 13,
     fontFamily: "Inter_600SemiBold",
     color: Colors.light.primary,
+  },
+
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.45)",
+    justifyContent: "flex-end",
+  },
+  modalCard: {
+    backgroundColor: "#fff",
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    padding: 24,
+    paddingBottom: 40,
+    gap: 12,
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontFamily: "Inter_700Bold",
+    color: Colors.light.text,
+  },
+  modalSubtitle: {
+    fontSize: 14,
+    fontFamily: "Inter_400Regular",
+    color: Colors.light.textSecondary,
+  },
+  datePicker: {
+    width: "100%",
+  },
+  modalButtons: {
+    flexDirection: "row",
+    gap: 12,
+    marginTop: 8,
+  },
+  modalCancelBtn: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: "#ddd",
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: "center",
+  },
+  modalCancelText: {
+    fontSize: 15,
+    fontFamily: "Inter_500Medium",
+    color: Colors.light.textSecondary,
+  },
+  modalConfirmBtn: {
+    flex: 1,
+    backgroundColor: Colors.light.primary,
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: "center",
+  },
+  modalConfirmText: {
+    fontSize: 15,
+    fontFamily: "Inter_600SemiBold",
+    color: "#fff",
   },
 });

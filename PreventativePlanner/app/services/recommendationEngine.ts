@@ -1,71 +1,54 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
 export type UserProfile = {
   age: number;
   sex: string;
   riskFactors: string[];
 };
 
-export type Recommendation = {
+export type AIRecommendation = {
   id: string;
   title: string;
   category: string;
-  dueDate: string;
-  status: "upcoming" | "completed";
   explanation: string;
 };
 
-function nextYearDate(): string{
-  const date = new Date();
-  date.setFullYear(date.getFullYear()+1);
-  return date.toISOString().split("T")[0];
-}
+export async function generateAIRecommendations(profile: UserProfile): Promise<AIRecommendation[]> {
+  const cacheKey = `ai_recs_${JSON.stringify(profile)}`;
+  const cached = await AsyncStorage.getItem(cacheKey);
+  if (cached) return JSON.parse(cached);
 
-export function generateRecommendations(userProfile: UserProfile): Recommendation[] {
-  const recommendations: Recommendation[]=[];
-  const{age, sex, riskFactors} = userProfile;
+  const riskText = profile.riskFactors.length > 0 ? profile.riskFactors.join(', ') : 'none';
 
-  if (age>= 50){
-    recommendations.push({
-      id: "colon_screening",
-      title: "Colon Cancer Screening",
-      category: "Screening",
-      dueDate: nextYearDate(),
-      status: "upcoming",
-      explanation: "Recommended for adults age 50 and older"
-    });
-  }
+  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${process.env.EXPO_PUBLIC_OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: 'gpt-4o-mini',
+      response_format: { type: 'json_object' },
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are a preventative healthcare advisor. Return a JSON object with a single key "recommendations" containing an array. Each item must have: id (unique snake_case string), title (short appointment name), category (one of: Screening, Checkup, Vaccination, Consultation), explanation (1-2 sentences personalized to this specific patient).',
+        },
+        {
+          role: 'user',
+          content: `Patient: ${profile.age} year old ${profile.sex}. Risk factors: ${riskText}. Generate 4-6 preventative care recommendations.`,
+        },
+      ],
+    }),
+  });
 
-  if (sex.toLowerCase() === "female" && age >= 40){
-    recommendations.push({
-      id: "mammogram",
-      title: "Mammogram",
-      category: "Screening",
-      dueDate: nextYearDate(),
-      status:"upcoming",
-      explanation: "Recommended for women age 40 and older",
-    });
-  }
+  if (!response.ok) throw new Error(`OpenAI API error: ${response.status}`);
 
-  if(riskFactors.includes("Smoking")){
-    recommendations.push({
-      id: "lung_screening",
-      title: "Lung Cancer Screening",
-      category: "Screening",
-      dueDate: nextYearDate(),
-      status: "upcoming",
-      explanation: "People with smoking history may have increase lung cancer risk",
-    });
-  }
+  const data = await response.json();
+  const parsed = JSON.parse(data.choices[0].message.content);
+  const recs: AIRecommendation[] = parsed.recommendations;
 
-  if(age>=18){
-    recommendations.push({
-      id:"annual_checkup",
-      title:"Annual Physical Checkup",
-      category:"Checkup",
-      dueDate: nextYearDate(),
-      status: "upcoming",
-      explanation:"Routine annual checkup for adults to monitor health",
-    });
-  }
-
-  return recommendations;
+  await AsyncStorage.setItem(cacheKey, JSON.stringify(recs));
+  return recs;
 }
